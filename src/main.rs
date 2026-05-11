@@ -1,7 +1,9 @@
 use std::{
     io,
+    sync::mpsc,
+    thread,
     time::{Duration, Instant},
-    vec, thread, sync::mpsc
+    vec,
 };
 
 use crossterm::{
@@ -45,7 +47,7 @@ impl ProcessInfo {
 const CANTIDAD_HISTORIAL: usize = 200;
 
 fn main() -> std::io::Result<()> {
-    let mut system = System::new_all();
+    //let mut system = System::new_all();
 
     enable_raw_mode()?;
 
@@ -57,33 +59,45 @@ fn main() -> std::io::Result<()> {
 
     let frame_duration = Duration::from_millis(16);
 
-    let mut last_update = Instant::now();
-
     let mut vector_procesos_actual: Vec<ProcessInfo> = Vec::new();
 
     let mut vector_procesos_tiempo: Vec<(String, Vec<u64>)> = Vec::new();
 
     let mut lista_pid_modificados: Vec<String> = Vec::new();
 
-    let mut primera_ejecucion = true;
+    let (tx, rx) = mpsc::channel::<Vec<ProcessInfo>>();
 
-    loop {
-        let start = Instant::now();
+    thread::spawn(move || {
+        let mut system = System::new_all();
 
-        if last_update.elapsed() > Duration::from_millis(500) || primera_ejecucion {
-            primera_ejecucion = false;
+        loop {
             system.refresh_all();
-            vector_procesos_actual.clear();
-            lista_pid_modificados.clear();
+
+            let mut procesos = Vec::new();
 
             for (pid, process) in system.processes() {
-                vector_procesos_actual.push(ProcessInfo::new(
+                procesos.push(ProcessInfo::new(
                     pid.to_string(),
                     process.name().to_str().unwrap_or("").to_string(),
                     process.cpu_usage(),
                     process.memory(),
                 ));
             }
+
+            if tx.send(procesos).is_err() {
+                break;
+            }
+
+            thread::sleep(Duration::from_millis(500));
+        }
+    });
+
+    loop {
+        let start = Instant::now();
+
+        if let Ok(procesos) = rx.try_recv() {
+            vector_procesos_actual = procesos;
+            lista_pid_modificados.clear();
 
             // Si esta vacia la inicializo con los valores actuales
             if vector_procesos_tiempo.is_empty() {
@@ -120,8 +134,6 @@ fn main() -> std::io::Result<()> {
 
                 vector_procesos_tiempo.sort_by(|a, b| b.1[0].partial_cmp(&a.1[0]).unwrap());
             }
-
-            last_update = Instant::now();
         }
 
         terminal.draw(|frame| {
@@ -172,6 +184,12 @@ fn main() -> std::io::Result<()> {
                     .expect("ERROR AL OBTENER EL MAXIMO");
 
                 if let Some(detalle) = detalles_proceso {
+                    let color = if detalle.name == "performance_monitor.exe" {
+                        Color::Green
+                    } else {
+                        Color::Gray
+                    };
+
                     let sparkline = Sparkline::default()
                         .block(Block::default().borders(Borders::ALL).title(format!(
                             "PID: {} Nombre Proceso: {} Ram Usada: {:.2} Cpu Usada: {:.2}",
@@ -179,9 +197,10 @@ fn main() -> std::io::Result<()> {
                             detalle.name,
                             detalle.memory_mb(),
                             detalle.cpu
-                        )))
+                        )).border_style(Style::default().fg(color) ))
                         .data(&proceso.1)
-                        .max(max_cpu_usage);
+                        .max(max_cpu_usage)
+                        .style(Style::default().fg(color));
 
                     frame.render_widget(sparkline, chunks[i + 1]);
                 }
